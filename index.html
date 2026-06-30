@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAG Assistant</title>
+<style>
+  :root {
+    --bg: #FAF9F6;
+    --bg-sidebar: #F0EEE6;
+    --bg-bubble-user: #DA7756;
+    --bg-bubble-assistant: #FFFFFF;
+    --text-primary: #2B2B26;
+    --text-secondary: #6B6860;
+    --border: #E5E2D9;
+    --accent: #DA7756;
+    --accent-hover: #C2674A;
+    --accent-soft: #F3E4DC;
+    --danger: #B5453A;
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+    --font-body: 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+    --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    font-family: var(--font-ui);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+  }
+  #app { display: flex; height: 100vh; overflow: hidden; }
+  #sidebar {
+    width: 280px; flex-shrink: 0;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    transition: margin-left 0.25s ease;
+  }
+  #sidebar.collapsed { margin-left: -280px; }
+  .sidebar-header { padding: 18px 16px 12px; display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+  .brand-mark {
+    width: 22px; height: 22px; border-radius: 6px; background: var(--accent);
+    display: flex; align-items: center; justify-content: center; color: white;
+    font-size: 12px; font-weight: 700; font-family: var(--font-body);
+  }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: var(--radius-sm); border: none;
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+  }
+  .icon-btn:hover { background: rgba(0,0,0,0.06); color: var(--text-primary); }
+  .new-chat-btn {
+    margin: 4px 16px 14px; padding: 9px 14px; border-radius: var(--radius-md);
+    border: 1px solid var(--border); background: white; color: var(--text-primary);
+    font-size: 13.5px; font-weight: 500; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .new-chat-btn:hover { border-color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .sidebar-section-label {
+    padding: 0 18px 6px; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-secondary); opacity: 0.75;
+  }
+  #thread-list { flex: 1; overflow-y: auto; padding: 0 10px; }
+  .thread-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    padding: 9px 10px; border-radius: var(--radius-sm); cursor: pointer;
+    font-size: 13.5px; margin-bottom: 2px; transition: background 0.15s; position: relative;
+  }
+  .thread-item:hover { background: rgba(0,0,0,0.05); }
+  .thread-item.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 500; }
+  .thread-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .thread-delete {
+    opacity: 0; background: none; border: none; color: var(--text-secondary);
+    cursor: pointer; padding: 2px 4px; border-radius: 4px; font-size: 13px; flex-shrink: 0;
+  }
+  .thread-item:hover .thread-delete { opacity: 1; }
+  .thread-delete:hover { color: var(--danger); background: rgba(181,69,58,0.1); }
+  .thread-empty { padding: 14px 10px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+  .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-secondary); }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+  #topbar { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #sidebar-toggle { display: none; }
+  .topbar-title { font-weight: 600; font-size: 14.5px; }
+  .topbar-sub { font-size: 12.5px; color: var(--text-secondary); }
+  #chat-scroll { flex: 1; overflow-y: auto; display: flex; justify-content: center; }
+  #chat-inner { width: 100%; max-width: 720px; padding: 28px 24px 40px; display: flex; flex-direction: column; gap: 22px; }
+  #empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 60px 20px; gap: 10px; }
+  .empty-mark {
+    width: 52px; height: 52px; border-radius: 14px; background: var(--accent);
+    display: flex; align-items: center; justify-content: center; color: white;
+    font-family: var(--font-body); font-size: 24px; font-weight: 700; margin-bottom: 6px;
+  }
+  #empty-state h1 { font-family: var(--font-body); font-size: 26px; font-weight: 500; margin: 0; }
+  #empty-state p { font-size: 14px; color: var(--text-secondary); margin: 0; max-width: 380px; line-height: 1.6; }
+  .suggestion-row { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; justify-content: center; }
+  .suggestion-chip {
+    padding: 9px 16px; border: 1px solid var(--border); border-radius: 20px;
+    background: white; font-size: 13px; cursor: pointer; transition: border-color 0.15s, transform 0.1s;
+  }
+  .suggestion-chip:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .msg-row { display: flex; gap: 12px; align-items: flex-start; }
+  .msg-row.user { justify-content: flex-end; }
+  .avatar {
+    width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; font-family: var(--font-body);
+    color: white; background: var(--accent); margin-top: 2px;
+  }
+  .msg-bubble {
+    max-width: 78%; padding: 13px 16px; border-radius: var(--radius-md);
+    font-family: var(--font-body); font-size: 15.5px; line-height: 1.65;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .msg-row.user .msg-bubble {
+    background: var(--accent); color: white;
+    border-radius: var(--radius-md) var(--radius-md) 4px var(--radius-md);
+    font-family: var(--font-ui); font-size: 14.5px;
+  }
+  .msg-row.assistant .msg-bubble {
+    background: var(--bg-bubble-assistant); border: 1px solid var(--border);
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-md) 4px; color: var(--text-primary);
+  }
+  .msg-bubble code { background: rgba(0,0,0,0.06); padding: 2px 5px; border-radius: 4px; font-family: 'SF Mono', Consolas, monospace; font-size: 0.9em; }
+  .msg-bubble strong { font-weight: 700; }
+  .typing-dots { display: inline-flex; gap: 4px; padding: 4px 2px; }
+  .typing-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: 0.5; animation: blink 1.2s infinite ease-in-out; }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.3; transform: scale(0.85); } 40% { opacity: 1; transform: scale(1); } }
+  .msg-error { color: var(--danger); font-size: 13.5px; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 8px; background: var(--accent-soft);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px;
+    font-size: 13px; color: var(--accent-hover); margin-bottom: 4px;
+  }
+  #composer-wrap { display: flex; justify-content: center; padding: 14px 24px 22px; flex-shrink: 0; }
+  #composer {
+    width: 100%; max-width: 720px; background: white; border: 1px solid var(--border);
+    border-radius: var(--radius-lg); box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.03);
+    padding: 10px 10px 10px 14px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.15s;
+  }
+  #composer:focus-within { border-color: var(--accent); }
+  #pending-file-row { display: none; align-items: center; gap: 8px; padding: 0 2px; }
+  #pending-file-row.show { display: flex; }
+  .pending-file-chip {
+    display: inline-flex; align-items: center; gap: 8px; background: var(--accent-soft);
+    border-radius: var(--radius-sm); padding: 6px 10px; font-size: 12.5px; color: var(--accent-hover);
+  }
+  .pending-file-chip button { border: none; background: none; cursor: pointer; color: var(--accent-hover); font-size: 14px; line-height: 1; padding: 0; }
+  .composer-row { display: flex; align-items: flex-end; gap: 8px; }
+  #msg-input {
+    flex: 1; border: none; outline: none; resize: none; font-size: 14.5px; line-height: 1.5;
+    max-height: 160px; padding: 6px 4px; background: transparent; color: var(--text-primary);
+  }
+  #msg-input::placeholder { color: var(--text-secondary); opacity: 0.8; }
+  .composer-btn {
+    width: 34px; height: 34px; border-radius: 10px; border: none; background: transparent;
+    color: var(--text-secondary); cursor: pointer; display: flex; align-items: center;
+    justify-content: center; flex-shrink: 0; transition: background 0.15s, color 0.15s;
+  }
+  .composer-btn:hover { background: rgba(0,0,0,0.06); color: var(--text-primary); }
+  #send-btn { background: var(--accent); color: white; }
+  #send-btn:hover { background: var(--accent-hover); color: white; }
+  #send-btn:disabled { background: var(--border); color: var(--text-secondary); cursor: not-allowed; }
+  .composer-hint { text-align: center; font-size: 11.5px; color: var(--text-secondary); margin-top: 6px; }
+  #pdf-input { display: none; }
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(10px);
+    background: var(--text-primary); color: white; padding: 10px 18px; border-radius: var(--radius-md);
+    font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s;
+    z-index: 100; max-width: 80%; text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.error { background: var(--danger); }
+  #chat-scroll::-webkit-scrollbar, #thread-list::-webkit-scrollbar { width: 8px; }
+  #chat-scroll::-webkit-scrollbar-thumb, #thread-list::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 8px; }
+  #chat-scroll::-webkit-scrollbar-track, #thread-list::-webkit-scrollbar-track { background: transparent; }
+  @media (max-width: 760px) {
+    #sidebar { position: fixed; z-index: 50; height: 100%; }
+    #sidebar.collapsed { margin-left: -280px; }
+    #sidebar-toggle { display: flex; }
+    .msg-bubble { max-width: 86%; }
+  }
+  .table-wrap { overflow-x: auto; margin: 8px 0; }
+  .md-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--font-ui);
+    font-size: 13.5px;
+  }
+  .md-table th, .md-table td {
+    border: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: left;
+  }
+  .md-table th { background: var(--accent-soft); font-weight: 600; color: var(--text-primary); }
+  .msg-bubble a { color: var(--accent-hover); text-decoration: underline; }
+</style>
+</head>
+<body>
+
+    <div id="app">
+    <aside id="sidebar">
+        <div class="sidebar-header">
+        <div class="brand">
+            <div class="brand-mark">R</div>
+            <span>RAG Assistant</span>
+        </div>
+        <button class="icon-btn" id="collapse-btn" title="Collapse sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3v18M3 3h18v18H3V3z"/></svg>
+        </button>
+        </div>
+        <button class="new-chat-btn" id="new-chat-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+        </button>
+        <div class="sidebar-section-label">Recent</div>
+        <div id="thread-list"></div>
+        <div class="sidebar-footer">Connected to localhost:8000</div>
+    </aside>
+
+    <main id="main">
+        <div id="topbar">
+        <button class="icon-btn" id="sidebar-toggle">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <div>
+            <div class="topbar-title" id="topbar-title">New chat</div>
+            <div class="topbar-sub" id="topbar-sub">Ask anything, or upload a PDF to chat with it</div>
+        </div>
+        </div>
+
+        <div id="chat-scroll">
+        <div id="chat-inner">
+            <div id="empty-state">
+            <div class="empty-mark">R</div>
+            <h1>What can I help with?</h1>
+            <p>Ask about weather, stock prices, jobs, or upload a PDF and ask questions about it.</p>
+            <div class="suggestion-row">
+                <button class="suggestion-chip" data-prompt="Weather in Mumbai right now?">Weather in Mumbai</button>
+                <button class="suggestion-chip" data-prompt="What is Apple's current stock price?">Apple stock price</button>
+                <button class="suggestion-chip" data-prompt="Find me Python developer jobs in Bangalore">Find me a job</button>
+            </div>
+            </div>
+        </div>
+        </div>
+
+        <div id="composer-wrap">
+        <div id="composer">
+            <div id="pending-file-row"></div>
+            <div class="composer-row">
+            <button class="composer-btn" id="attach-btn" title="Attach PDF">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <textarea id="msg-input" rows="1" placeholder="Message RAG Assistant…"></textarea>
+            <button class="composer-btn" id="send-btn" title="Send">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            </div>
+        </div>
+        </div>
+        <div class="composer-hint">Enter to send • Shift+Enter for new line</div>
+        <input type="file" id="pdf-input" accept="application/pdf" />
+    </main>
+    </div>
+
+    <div id="toast"></div>
+    <script>
+        console.log('PAGE LOADED AT:', new Date().toLocaleTimeString());
+        // ***********************************************Setup: backend URL aur app state********************************
+        const API_BASE = 'http://localhost:8000';
+
+        let state = {
+        threadId: null,
+        threads: [],       // sab chat threads ki list
+        messages: [],       // current chat ke saare messages
+        pendingFile: null,  // jo PDF abhi attach hua hai par send nahi hua
+        isStreaming: false, // jab tak reply aa raha hai, true rahega
+        };
+
+        const el = {
+        sidebar: document.getElementById('sidebar'),
+        collapseBtn: document.getElementById('collapse-btn'),
+        sidebarToggle: document.getElementById('sidebar-toggle'),
+        newChatBtn: document.getElementById('new-chat-btn'),
+        threadList: document.getElementById('thread-list'),
+        chatInner: document.getElementById('chat-inner'),
+        chatScroll: document.getElementById('chat-scroll'),
+        emptyState: document.getElementById('empty-state'),
+        msgInput: document.getElementById('msg-input'),
+        sendBtn: document.getElementById('send-btn'),
+        attachBtn: document.getElementById('attach-btn'),
+        pdfInput: document.getElementById('pdf-input'),
+        pendingFileRow: document.getElementById('pending-file-row'),
+        topbarTitle: document.getElementById('topbar-title'),
+        topbarSub: document.getElementById('topbar-sub'),
+        toast: document.getElementById('toast'),
+        };
+        // ***********************************************for notification**********************************
+
+        function showToast(message, isError = false){
+            el.toast.textContent = message;
+            el.toast.className = isError ? 'show error' : 'show';
+            setTimeout(() => { el.toast.className = ''; }, 3200);
+        }
+        // ***************************************remember thread name*******************************************
+
+        function getThreadLabel(id) {
+            return localStorage.getItem('thread_label_' + id) || 'Untitled chat';
+        }
+        function setThreadLabel(id, label) {
+            try { localStorage.setItem('thread_label_' + id, label.slice(0, 48)); } catch(e) {}
+        }
+        //*****************************************load thread in sidebar ***********************************************
+        async function loadThreads() {
+            if (state._loadingThreads) return; 
+            try {
+                const res = await fetch(`${API_BASE}/threads`);
+                const data = await res.json();
+                state.threads = (data.threads || []);
+                renderThreadList();
+            } catch (e) {
+                console.error('Could not load threads', e);
+            }
+        }
+
+        function renderThreadList() {
+            el.threadList.innerHTML = '';
+            if (!state.threads.length) {
+                const empty = document.createElement('div');
+                empty.className = 'thread-empty';
+                empty.textContent = 'No conversations yet — start one below.';
+                el.threadList.appendChild(empty);
+                return;
+            }
+            state.threads.forEach(id => {
+                const item = document.createElement('div');
+                item.className = 'thread-item' + (id === state.threadId ? ' active' : '');
+                item.innerHTML = `
+                <span class="thread-label">${escapeHtml(getThreadLabel(id))}</span>
+                <button class="thread-delete" title="Delete chat">✕</button>
+                `;
+                item.querySelector('.thread-label').addEventListener('click', () => openThread(id));
+                item.querySelector('.thread-delete').addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteThread(id);
+                });
+                el.threadList.appendChild(item);
+            });
+        }
+        //**************************************deletion operation********************************************** 
+        async function deleteThread(id) {
+            try {
+                await fetch(`${API_BASE}/threads/${id}`, { method: 'DELETE' });
+                localStorage.removeItem('thread_label_' + id);
+                state.threads = state.threads.filter(t => t !== id);
+                if (state.threadId === id) startNewChat();
+                renderThreadList();
+                showToast('Chat deleted');
+            } catch (e) {
+                showToast('Could not delete chat', true);
+            }
+        }
+
+        async function openThread(id) {
+            state.threadId = id;
+            state.messages = [];
+            el.topbarTitle.textContent = getThreadLabel(id);
+            el.topbarSub.textContent = 'Continuing this conversation';
+            renderMessages();
+
+            try {
+                // PDF status check karo
+                const pdfRes = await fetch(`${API_BASE}/threads/${id}/has-pdf`);
+                const pdfData = await pdfRes.json();
+                if (pdfData.has_pdf) {
+                    el.topbarSub.textContent = `📄 ${pdfData.filename} — Ask anything about this document`;
+                }
+            } catch(e) {
+                console.error('Could not check PDF status', e);
+            }
+
+            try {
+                const res = await fetch(`${API_BASE}/threads/${id}/messages`);
+                const data = await res.json();
+                state.messages = data.messages || [];
+                renderMessages();
+            } catch(e) {
+                console.error('Could not load messages', e);
+            }
+            renderThreadList();
+            closeSidebarOnMobile();
+        }
+
+        function startNewChat() {
+            state.threadId = null;
+            state.messages = [];
+            state.pendingFile = null;
+            updatePendingFileUI();
+            el.topbarTitle.textContent = 'New chat';
+            el.topbarSub.textContent = 'Ask anything, or upload a PDF to chat with it';
+            renderMessages();
+            renderThreadList();
+            closeSidebarOnMobile();
+        }
+
+        // **************************************open and close in sidebar***************************************************
+        el.collapseBtn.addEventListener('click', () => el.sidebar.classList.add('collapsed'));
+            el.sidebarToggle.addEventListener('click', () => el.sidebar.classList.remove('collapsed'));
+            function closeSidebarOnMobile() {
+            if (window.innerWidth <= 760) el.sidebar.classList.add('collapsed');
+        }
+
+        el.newChatBtn.addEventListener('click', startNewChat);
+
+            document.querySelectorAll('.suggestion-chip').forEach(chip => {
+            chip.addEventListener('click', () => {
+                el.msgInput.value = chip.dataset.prompt;
+                sendMessage();
+            });
+        });
+
+        // **************************************messages screen pe dikhana***************************************************
+        function escapeHtml(str) {
+            const d = document.createElement('div');
+            d.textContent = str;
+            return d.innerHTML;
+        }
+        function basicMarkdown(text) {
+            let safe = escapeHtml(text);
+
+            // Markdown links: [label](url)
+            safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+            // Bold and inline code
+            safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            safe = safe.replace(/`(.+?)`/g, '<code>$1</code>');
+
+            // Markdown tables -> HTML tables
+            const lines = safe.split('\n');
+            let html = '';
+            let i = 0;
+            while (i < lines.length) {
+                const line = lines[i];
+                const isTableHeader = line.trim().startsWith('|') && line.includes('|');
+                const nextLine = lines[i + 1] || '';
+                const isSeparator = /^\s*\|?[\s:|-]+\|?\s*$/.test(nextLine) && nextLine.includes('-');
+
+                if (isTableHeader && isSeparator) {
+                    const headerCells = line.split('|').map(c => c.trim()).filter(c => c !== '');
+                    let tableRows = '';
+                    i += 2; // skip header + separator
+                    while (i < lines.length && lines[i].trim().startsWith('|')) {
+                        const cells = lines[i].split('|').map(c => c.trim()).filter(c => c !== '');
+                        tableRows += '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+                        i++;
+                    }
+                    html += '<div class="table-wrap"><table class="md-table"><thead><tr>' +
+                        headerCells.map(c => `<th>${c}</th>`).join('') +
+                        '</tr></thead><tbody>' + tableRows + '</tbody></table></div>';
+                } else {
+                    html += line + '\n';
+                    i++;
+                }
+            }
+
+            return html;
+        }
+
+        function renderMessages() {
+            el.chatInner.innerHTML = '';
+            if (state.messages.length === 0) {
+                el.chatInner.appendChild(el.emptyState);
+                return;
+            }
+            state.messages.forEach(m => el.chatInner.appendChild(buildMessageNode(m)));
+            scrollToBottom();
+        }
+
+        function buildMessageNode(m) {
+            const row = document.createElement('div');
+            row.className = `msg-row ${m.role}`;
+
+            if (m.role === 'assistant') {
+                const avatar = document.createElement('div');
+                avatar.className = 'avatar';
+                avatar.textContent = 'R';
+                row.appendChild(avatar);
+            }
+
+            const bubble = document.createElement('div');
+            bubble.className = 'msg-bubble';
+
+            if (m.fileChip) {
+                const chip = document.createElement('div');
+                chip.className = 'file-chip';
+                chip.innerHTML = `📄 ${escapeHtml(m.fileChip)}`;
+                bubble.appendChild(chip);
+                if (m.text) bubble.appendChild(document.createElement('br'));
+            }
+
+            if (m.isTyping) {
+                bubble.innerHTML += `<span class="typing-dots"><span></span><span></span><span></span></span>`;
+            } else if (m.isError) {
+                bubble.innerHTML += `<span class="msg-error">${escapeHtml(m.text)}</span>`;
+            } else if (m.text) {
+                const span = document.createElement('span');
+                span.innerHTML = basicMarkdown(m.text);
+                bubble.appendChild(span);
+            }
+
+            row.appendChild(bubble);
+            m._bubbleEl = bubble;
+            return row;
+            }
+
+            function scrollToBottom() {
+            el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
+        }
+
+        // **************************************composer: textarea aur enter key***************************************************
+        el.msgInput.addEventListener('input', () => {
+            el.msgInput.style.height = 'auto';
+            el.msgInput.style.height = Math.min(el.msgInput.scrollHeight, 160) + 'px';
+        });
+
+        el.msgInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        el.sendBtn.addEventListener('click', sendMessage);
+
+        // **************************************PDF attach karna***************************************************
+        el.attachBtn.addEventListener('click', () => el.pdfInput.click());
+
+            el.pdfInput.addEventListener('change', () => {
+            const file = el.pdfInput.files[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showToast('Only PDF files are supported', true);
+                el.pdfInput.value = '';
+                return;
+            }
+            state.pendingFile = file;
+            updatePendingFileUI();
+        });
+
+        function updatePendingFileUI() {
+            el.pendingFileRow.innerHTML = '';
+            if (!state.pendingFile) {
+                el.pendingFileRow.classList.remove('show');
+                return;
+            }
+            el.pendingFileRow.classList.add('show');
+            const chip = document.createElement('div');
+            chip.className = 'pending-file-chip';
+            chip.innerHTML = `📄 ${escapeHtml(state.pendingFile.name)} <button id="remove-pending-file">✕</button>`;
+            el.pendingFileRow.appendChild(chip);
+            document.getElementById('remove-pending-file').addEventListener('click', () => {
+                state.pendingFile = null;
+                el.pdfInput.value = '';
+                updatePendingFileUI();
+            });
+        }
+
+        // **************************************PDF backend ko upload karna***************************************************
+        async function uploadPendingFile(file) {
+            const formData = new FormData();
+            formData.append('file', file, file.name);
+            if (state.threadId) {
+                formData.append('thread_id', state.threadId);
+            }
+
+            const res = await fetch(`${API_BASE}/upload-pdf`, {
+                method: 'POST',
+                body: formData
+                // Content-Type header mat lagao — browser khud set karega boundary ke saath
+            });
+            
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+                throw new Error(err.detail || 'Upload failed');
+            }
+            return res.json();
+        }
+
+        // **************************************message bhejna (PDF ke saath ya bina)***************************************************
+        async function sendMessage() {
+            const text = el.msgInput.value.trim();
+            if ((!text && !state.pendingFile) || state.isStreaming) return;
+
+            const fileToSend = state.pendingFile;
+            state.pendingFile = null;
+            updatePendingFileUI();
+            el.msgInput.value = '';
+            el.msgInput.style.height = 'auto';
+
+            if (fileToSend) {
+                state.messages.push({ role: 'user', text: text || 'Please look at this document.', fileChip: fileToSend.name });
+                renderMessages();
+                try {
+                    showToast(`Indexing ${fileToSend.name}…`);
+                    const result = await uploadPendingFile(fileToSend);
+                    state.threadId = result.thread_id;
+                    if (!getThreadLabel(state.threadId) || getThreadLabel(state.threadId) === 'Untitled chat') {
+                        setThreadLabel(state.threadId, fileToSend.name);
+                    }
+                    showToast(`"${fileToSend.name}" is ready — ask away`);
+                    await loadThreads();
+                    renderThreadList();
+                } catch (e) {
+                    state.messages.push({ role: 'assistant', text: e.message || 'Could not process the PDF.', isError: true });
+                    renderMessages();
+                    return;
+                }
+                if (!text) return;
+            } else {
+                state.messages.push({ role: 'user', text });
+                renderMessages();
+            }
+
+            if (state.threadId && getThreadLabel(state.threadId) === 'Untitled chat') {
+                setThreadLabel(state.threadId, text);
+            }
+
+            await streamReply(text);
+        }
+
+//   *************************************streaming reply (token by token)***************************************************
+        async function streamReply(userText) {
+            state.isStreaming = true;
+            el.sendBtn.disabled = true;
+
+            const assistantMsg = { role: 'assistant', text: '', isTyping: true };
+            state.messages.push(assistantMsg);
+            renderMessages();
+
+            try {
+                const res = await fetch(`${API_BASE}/chat/stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: userText, thread_id: state.threadId }),
+                });
+
+                if (!res.ok || !res.body) throw new Error('Could not reach the server.');
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let firstToken = true;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const payload = JSON.parse(line.slice(6));
+
+                        if (payload.thread_id && !state.threadId) {
+                            state.threadId = payload.thread_id;
+                            if (getThreadLabel(state.threadId) === 'Untitled chat') {
+                                setThreadLabel(state.threadId, userText);
+                            }
+                            el.topbarTitle.textContent = getThreadLabel(state.threadId);
+                        }
+
+                        if (payload.token) {
+                            if (firstToken) {
+                                assistantMsg.isTyping = false;
+                                firstToken = false;
+                            }
+                            assistantMsg.text += payload.token;
+                            updateStreamingBubble(assistantMsg);
+                        }
+
+                        if (payload.error) {
+                            assistantMsg.isTyping = false;
+                            assistantMsg.isError = true;
+                            assistantMsg.text = payload.error;
+                            updateStreamingBubble(assistantMsg);
+                        }
+
+                        if (payload.done) {
+                            assistantMsg.isTyping = false;
+                        }
+                    }
+                }
+            } catch (e) {
+                assistantMsg.isTyping = false;
+                assistantMsg.isError = true;
+                assistantMsg.text = e.message || 'Something went wrong while streaming the reply.';
+                updateStreamingBubble(assistantMsg);
+            } finally {
+                state.isStreaming = false;
+                el.sendBtn.disabled = false;
+                if (!state._loadingThreads) {
+                    state._loadingThreads = true;
+                    await loadThreads();
+                    state._loadingThreads = false;
+                }
+                renderThreadList();
+            }
+        }
+
+        function updateStreamingBubble(msg) {
+            if (!msg._bubbleEl) { renderMessages(); return; }
+            if (msg.isError) {
+                msg._bubbleEl.innerHTML = `<span class="msg-error">${escapeHtml(msg.text)}</span>`;
+            } else if (msg.isTyping) {
+                msg._bubbleEl.innerHTML = `<span class="typing-dots"><span></span><span></span><span></span></span>`;
+            } else {
+                msg._bubbleEl.innerHTML = basicMarkdown(msg.text);
+            }
+            scrollToBottom();
+        }
+
+        // **************************************page khulte hi start hona***************************************************
+        loadThreads();
+        renderMessages();
+    </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.env
+myenv/
+venv/
+
+# Vector stores — mat push karo
+faiss_store/
+chroma_store/
+
+# VS Code
+.vscode/
