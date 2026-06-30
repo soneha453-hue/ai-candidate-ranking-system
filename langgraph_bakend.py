@@ -99,7 +99,7 @@ def run_async_with_reconnect(coro_factory):
 llm = ChatGroq(model='openai/gpt-oss-120b')
 
 embeddings = HuggingFaceEmbeddings(
-    model_name='BAAI/bge-base-en-v1.5'
+    model_name='all-MiniLM-L6-v2'
 )
 
 #******************************************pdf_retriever with chromadb*****************************************************
