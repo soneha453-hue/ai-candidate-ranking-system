@@ -149,16 +149,23 @@ async def upload_pdf(
     file_bytes = await file.read()
 
     try:
-        loop = asyncio.get_event_loop()
-        summary = await loop.run_in_executor(
-            None,
-            partial(ingest_pdf, file_bytes, thread_id=thread_id, filename=file.filename)
-        )
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            summary = await asyncio.wait_for(
+                loop.run_in_executor(
+                    pool,
+                    partial(ingest_pdf, file_bytes, thread_id=thread_id, filename=file.filename)
+                ),
+                timeout=120.0
+            )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="PDF processing timed out. Please try again.")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         import traceback
-        traceback.print_exc()  # ← terminal mein full error dikhega
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {e}")
 
     return {
@@ -166,7 +173,6 @@ async def upload_pdf(
         "message": f"'{summary['filename']}' indexed successfully.",
         **summary,
     }
- 
 # ----------------------------------------------------------------------------------
 # Thread management
 # ----------------------------------------------------------------------------------

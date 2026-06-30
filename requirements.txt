@@ -13,8 +13,8 @@ sentence-transformers
 pypdf
 langgraph-checkpoint-postgres
 psycopg2-binary
-langchain-chroma
-chromadb
+langchain-postgres
+faiss-cpu
 nest_asyncio
 scikit-learn
 psycopg[binary]

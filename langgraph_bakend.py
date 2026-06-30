@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import  Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from  langchain_core.messages import BaseMessage,HumanMessage,SystemMessage,trim_messages
 from langgraph.graph.message import add_messages
@@ -99,7 +99,7 @@ def run_async_with_reconnect(coro_factory):
 llm = ChatGroq(model='openai/gpt-oss-120b')
 
 embeddings = HuggingFaceEmbeddings(
-    model_name='all-MiniLM-L6-v2'
+    model_name='BAAI/bge-small-en-v1.5'
 )
 
 #******************************************pdf_retriever with chromadb*****************************************************
@@ -139,13 +139,8 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
             _THREAD_METADATA[tid] = []
 
         doc_index = len(_THREAD_RETRIEVERS[tid])
-        
-        
-        save_path = f"chroma_store/{thread_id}/{doc_index}"
-        os.makedirs(save_path, exist_ok=True)
-        vector_store = Chroma.from_documents(
-            chunks, embeddings, persist_directory=save_path
-        )
+
+        vector_store = FAISS.from_documents(chunks, embeddings)
         retriever = vector_store.as_retriever(
             search_type="similarity", search_kwargs={"k": 4}
         )
@@ -161,10 +156,13 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
         _THREAD_METADATA[tid].append(meta)
 
         try:
+            save_path = f"faiss_store/{thread_id}/{doc_index}"
+            os.makedirs(save_path, exist_ok=True)
+            vector_store.save_local(save_path)
             with open(f"{save_path}/metadata.json", "w") as f:
                 json.dump(meta, f)
         except Exception as e:
-            print(f"Metadata save warning: {e}")
+            print(f"FAISS save warning: {e}")
 
         return meta
 
@@ -210,7 +208,14 @@ When a user uploads a PDF or document:
 - Do NOT ask the user to re-upload — trust that the document is indexed and use rag_tool
 
 ## Candidate Ranking Behavior
+## Candidate Ranking Behavior
 When multiple resumes are uploaded and user wants to rank or compare:
+- ALWAYS use rank_candidates tool with the job description provided by user
+- If user has not provided a job description, ask for it first
+- ALWAYS present results in a markdown table with columns: Rank | Candidate | Score | Why it stands out
+- Never change the output format — always use table format
+- Never rank from memory — always use the tool
+ When multiple resumes are uploaded and user wants to rank or compare:
 - ALWAYS use rank_candidates tool with the job description provided by user
 - If user has not provided a job description, ask for it first
 - Return results clearly showing rank, score, and reason
@@ -557,8 +562,9 @@ chatbot=graph.compile(checkpointer=checkpointer)
 
 #****************************************************reload-block*****************************************************************
 
+
 import glob
-for _thread_path in glob.glob("chroma_store/*"):
+for _thread_path in glob.glob("faiss_store/*"):
     _tid = os.path.basename(_thread_path)
     if not os.path.isdir(_thread_path):
         continue
@@ -570,10 +576,7 @@ for _thread_path in glob.glob("chroma_store/*"):
         if not os.path.isdir(_doc_path):
             continue
         try:
-            _vs = Chroma(
-                persist_directory=_doc_path,
-                embedding_function=embeddings
-            )
+            _vs = FAISS.load_local(_doc_path, embeddings, allow_dangerous_deserialization=True)
             _THREAD_RETRIEVERS[_tid].append(
                 _vs.as_retriever(search_type="similarity", search_kwargs={"k": 4})
             )
@@ -583,7 +586,7 @@ for _thread_path in glob.glob("chroma_store/*"):
                     _THREAD_METADATA[_tid].append(json.load(f))
             else:
                 _THREAD_METADATA[_tid].append({"filename": "uploaded document"})
-            print(f"Reloaded Chroma: {_tid}/{os.path.basename(_doc_path)}")
+            print(f"Reloaded FAISS: {_tid}/{os.path.basename(_doc_path)}")
         except Exception as _e:
             print(f"Could not reload {_doc_path}: {_e}")
 #**********************************************Dynamic thread****************************************************

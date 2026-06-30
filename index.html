@@ -594,7 +594,7 @@
         }
 
         // **************************************message bhejna (PDF ke saath ya bina)***************************************************
-        async function sendMessage() {
+       async function sendMessage() {
             const text = el.msgInput.value.trim();
             if ((!text && !state.pendingFile) || state.isStreaming) return;
 
@@ -634,7 +634,6 @@
 
             await streamReply(text);
         }
-
 //   *************************************streaming reply (token by token)***************************************************
         async function streamReply(userText) {
             state.isStreaming = true;
