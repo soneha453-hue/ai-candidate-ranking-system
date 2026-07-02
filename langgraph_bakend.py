@@ -502,12 +502,12 @@ def rank_json_candidates_v2(job_description: str, config: RunnableConfig) -> str
         return "No JSON candidates loaded for this chat. Please upload a candidates JSON/JSONL file first."
 
     jd_embedding = embeddings.embed_query(job_description)
-    jd_keywords = _tokenize(job_description)
+    jd_keywords = _tokenize(job_description)          # 🔥 FIXED
 
     results = []
     for c in candidates:
         cand_text = json.dumps(c, ensure_ascii=False).lower()
-        cand_words = _tokenize(cand_text)
+        cand_words = _tokenize(cand_text)              # 🔥 FIXED
 
         # 1. Semantic match (0-40)
         cand_embedding = embeddings.embed_query(cand_text[:2000])
@@ -519,13 +519,13 @@ def rank_json_candidates_v2(job_description: str, config: RunnableConfig) -> str
         matched_keywords = jd_keywords & cand_words
         skill_score = round(len(matched_keywords) / max(len(jd_keywords), 1) * 20, 2)
 
-        # 3. Behavioral/availability signals (0-25) — "beyond keyword matching"
+        # 3. Behavioral/availability signals (0-25)
         signals = c.get("redrob_signals", {})
         behavior_score = 0
         flags = []
 
         response_rate = signals.get("recruiter_response_rate", 0)
-        behavior_score += response_rate * 10  # up to 10 pts
+        behavior_score += response_rate * 10
 
         if not signals.get("open_to_work_flag", False):
             flags.append("not currently open to work")
@@ -545,7 +545,7 @@ def rank_json_candidates_v2(job_description: str, config: RunnableConfig) -> str
 
         behavior_score = round(min(behavior_score, 25), 2)
 
-        # 4. Skill verification check (0-15) — "handle suspicious profiles"
+        # 4. Skill verification check (0-15)
         skill_verify_score = 15
         assessment_scores = signals.get("skill_assessment_scores", {})
         skills_listed = c.get("skills", [])

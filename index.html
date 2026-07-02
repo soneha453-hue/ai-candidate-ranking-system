@@ -384,7 +384,7 @@
                 const pdfRes = await fetch(`${API_BASE}/threads/${id}/has-pdf`);
                 const pdfData = await pdfRes.json();
                 if (pdfData.has_pdf) {
-                    el.topbarSub.textContent = `📄 ${pdfData.filename} — Ask anything about this document`;
+                    el.topbarSub.textContent = ` ${pdfData.filename} — Ask anything about this document`;
                 }
             } catch(e) {
                 console.error('Could not check PDF status', e);
@@ -505,7 +505,7 @@
             if (m.fileChip) {
                 const chip = document.createElement('div');
                 chip.className = 'file-chip';
-                chip.innerHTML = `📄 ${escapeHtml(m.fileChip)}`;
+                chip.innerHTML = ` ${escapeHtml(m.fileChip)}`;
                 bubble.appendChild(chip);
                 if (m.text) bubble.appendChild(document.createElement('br'));
             }
@@ -568,7 +568,7 @@
             el.pendingFileRow.classList.add('show');
             const chip = document.createElement('div');
             chip.className = 'pending-file-chip';
-            chip.innerHTML = `📄 ${escapeHtml(state.pendingFile.name)} <button id="remove-pending-file">✕</button>`;
+            chip.innerHTML = ` ${escapeHtml(state.pendingFile.name)} <button id="remove-pending-file">✕</button>`;
             el.pendingFileRow.appendChild(chip);
             document.getElementById('remove-pending-file').addEventListener('click', () => {
                 state.pendingFile = null;
@@ -595,9 +595,14 @@
                 return;
             }
 
-            try {
-                showToast(`Indexing ${file.name}…`);
+            // chip dikhao "uploading" state ke saath
+            el.pendingFileRow.classList.add('show');
+            const chip = document.createElement('div');
+            chip.className = 'pending-file-chip';
+            chip.innerHTML = ` ${escapeHtml(file.name)} — uploading…`;
+            el.pendingFileRow.appendChild(chip);
 
+            try {
                 const formData = new FormData();
                 formData.append('file', file, file.name);
                 if (state.threadId) {
@@ -621,16 +626,22 @@
                     setThreadLabel(state.threadId, file.name);
                 }
 
-                showToast(`"${file.name}" is ready — ask away`);
+                chip.innerHTML = ` ${escapeHtml(file.name)} — indexed (${result.candidates_loaded || result.documents || ''} records) <button id="remove-json-chip">✕</button>`;
+                document.getElementById('remove-json-chip').addEventListener('click', () => {
+                    chip.remove();
+                    if (!el.pendingFileRow.children.length) {
+                        el.pendingFileRow.classList.remove('show');
+                    }
+                });
+
                 await loadThreads();
                 renderThreadList();
             } catch (e) {
-                showToast(e.message || 'Could not process the JSON file.', true);
+                chip.innerHTML = `❌ ${escapeHtml(file.name)} — failed: ${escapeHtml(e.message || 'error')}`;
             } finally {
                 el.jsonInput.value = '';
             }
         });
-
 
         // **************************************upload pdf from bakend ***************************************************
         async function uploadPendingFile(file) {
