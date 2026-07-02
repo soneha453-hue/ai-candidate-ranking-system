@@ -5,9 +5,16 @@ __pycache__/
 myenv/
 venv/
 
-# Vector stores — mat push karo
+# Vector stores — don't push
 faiss_store/
 chroma_store/
+pgvector_meta/
+
+# PostgreSQL
+*.dump
+*.backup
+pgdata/
+postgres_data/
 
 # VS Code
 .vscode/

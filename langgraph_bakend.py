@@ -11,7 +11,7 @@ nest_asyncio.apply()
 #**********************************imports*******************************************************************
 from langgraph.graph import StateGraph,START,END
 import tempfile
-
+from psycopg_pool import AsyncConnectionPool
 from typing import TypedDict ,Annotated,Any,Dict,Optional
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -65,43 +65,57 @@ async def _init_checkpointer():
     await checkpointer.setup()
 
 _run_async(_init_checkpointer())
+
+
 async def _ensure_connection():
     """
     Neon's free tier suspends the compute and drops idle connections.
-    If the checkpointer's connection is closed, reconnect it transparently.
+    checkpointer.conn ab pool hai, isliye pool se ek connection borrow
+    karke ping karte hain, single connection nahi.
     """
-    global checkpointer, _checkpointer_cm
+    global checkpointer, _pool
     try:
-        if checkpointer.conn.closed:
-            print("Checkpointer connection was closed — reconnecting...")
-            try:
-                await _checkpointer_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            _checkpointer_cm = AsyncPostgresSaver.from_conn_string(DB_URL)
-            checkpointer = await _checkpointer_cm.__aenter__()
+        async with checkpointer.conn.connection() as conn:
+            await conn.execute("SELECT 1")
     except Exception as e:
-        print(f"Reconnect check failed: {e}")
-
+        print(f"Connection dead, reconnecting... ({e})")
+        try:
+            await _pool.close()
+        except Exception:
+            pass
+        _pool = AsyncConnectionPool(
+            conninfo=DB_URL,
+            max_size=5,
+            kwargs={"autocommit": True, "keepalives": 1, "keepalives_idle": 30},
+            open=False,
+        )
+        await _pool.open()
+        checkpointer = AsyncPostgresSaver(_pool)
+        await checkpointer.setup()
 
 def run_async_with_reconnect(coro_factory):
     """
-    Run a coroutine on the dedicated loop, retrying once after reconnecting
-    if the Postgres connection turned out to be closed.
+    Run a coroutine on the dedicated loop. Pings connection first, and if
+    the query still fails mid-way (connection died in between), reconnects
+    once and retries.
     """
     async def _wrapped():
         await _ensure_connection()
-        return await coro_factory()
+        try:
+            return await coro_factory()
+        except Exception as e:
+            print(f"Query failed mid-way, forcing reconnect and retrying... ({e})")
+            await _ensure_connection()
+            return await coro_factory()
 
     return asyncio.run_coroutine_threadsafe(_wrapped(), _loop).result()
 #*********************************************LLM*********************************************************
 
-llm = ChatGroq(model='openai/gpt-oss-120b')
+llm = ChatGroq(model='meta-llama/llama-4-scout-17b-16e-instruct')
 
 embeddings = HuggingFaceEmbeddings(
-    model_name='BAAI/bge-small-en-v1.5'
+    model_name="BAAI/bge-small-en-v1.5"
 )
-
 #******************************************pdf_retriever with chromadb*****************************************************
 _THREAD_RETRIEVERS: Dict[str, list] = {}  
 _THREAD_METADATA: Dict[str, list] = {}  
@@ -127,10 +141,17 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
         loader = PyPDFLoader(temp_path)
         docs = loader.load()
 
+        if not docs:
+            raise ValueError("PDF load failed: no readable pages")
+
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""]
         )
+
         chunks = splitter.split_documents(docs)
+
+        if not chunks or len(chunks) == 0:
+            raise ValueError("PDF se text extract nahi hua (chunks empty)")
 
         tid = str(thread_id)
 
@@ -140,7 +161,18 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
 
         doc_index = len(_THREAD_RETRIEVERS[tid])
 
-        vector_store = FAISS.from_documents(chunks, embeddings)
+        # Batch embeddings taaki bade PDFs mein API limit hit na ho
+        texts = [c.page_content for c in chunks]
+        BATCH_SIZE = 50
+        vector_store = None
+
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch = texts[i:i + BATCH_SIZE]
+            if vector_store is None:
+                vector_store = FAISS.from_texts(batch, embeddings)
+            else:
+                vector_store.add_texts(batch)
+
         retriever = vector_store.as_retriever(
             search_type="similarity", search_kwargs={"k": 4}
         )
@@ -153,6 +185,7 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
             "chunks": len(chunks),
             "index": doc_index
         }
+
         _THREAD_METADATA[tid].append(meta)
 
         try:
@@ -171,6 +204,97 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
             os.remove(temp_path)
         except OSError:
             pass
+ #**********************************************JSON ingestion (ADDITIVE ONLY)*********************************************
+
+from langchain_core.documents import Document
+
+def ingest_json(file_path: str, thread_id: str, filename: Optional[str] = None, batch_size: int = 200) -> dict:
+    """
+    Streams a .json or .jsonl file line-by-line / item-by-item so large files
+    (like candidates.jsonl) don't blow up memory. Builds/extends a FAISS index
+    for the given thread, same way ingest_pdf does.
+    """
+    if not os.path.exists(file_path):
+        raise ValueError("No file found for ingestion.")
+
+    tid = str(thread_id)
+
+    if tid not in _THREAD_RETRIEVERS:
+        _THREAD_RETRIEVERS[tid] = []
+        _THREAD_METADATA[tid] = []
+
+    doc_index = len(_THREAD_RETRIEVERS[tid])
+
+    is_jsonl = file_path.endswith(".jsonl")
+
+    vector_store = None
+    total_items = 0
+    batch_docs = []
+
+    def _flush(batch):
+        nonlocal vector_store
+        if not batch:
+            return
+        if vector_store is None:
+            vector_store = FAISS.from_documents(batch, embeddings)
+        else:
+            vector_store.add_documents(batch)
+
+    try:
+        if is_jsonl:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    text = json.dumps(item, ensure_ascii=False)
+                    batch_docs.append(Document(page_content=text, metadata={"source": filename}))
+                    total_items += 1
+                    if len(batch_docs) >= batch_size:
+                        _flush(batch_docs)
+                        batch_docs = []
+            _flush(batch_docs)
+        else:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                text = json.dumps(item, ensure_ascii=False)
+                batch_docs.append(Document(page_content=text, metadata={"source": filename}))
+                total_items += 1
+                if len(batch_docs) >= batch_size:
+                    _flush(batch_docs)
+                    batch_docs = []
+            _flush(batch_docs)
+
+        if vector_store is None:
+            raise ValueError("No items found to index in the JSON file.")
+
+        retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+        _THREAD_RETRIEVERS[tid].append(retriever)
+
+        meta = {
+            "filename": filename or os.path.basename(file_path),
+            "documents": total_items,
+            "chunks": total_items,
+            "index": doc_index
+        }
+        _THREAD_METADATA[tid].append(meta)
+
+        try:
+            save_path = f"faiss_store/{thread_id}/{doc_index}"
+            os.makedirs(save_path, exist_ok=True)
+            vector_store.save_local(save_path)
+            with open(f"{save_path}/metadata.json", "w") as f:
+                json.dump(meta, f)
+        except Exception as e:
+            print(f"FAISS save warning: {e}")
+
+        return meta
+
+    finally:
+        pass  # temp file cleanup handled by caller       
 #**********************************************system prompt*********************************************
 system_prompt = r"""You are a smart, helpful AI assistant with access to powerful tools. Always use the right tool for the right task — never make up answers when a tool can fetch accurate information.
 
@@ -192,7 +316,9 @@ ALWAYS use the appropriate tool — never guess or make up answers:
 - User asks about news/current events/general knowledge → search tool
 - User asks about uploaded PDF/document → rag_tool
 - User asks about jobs/careers → search_jobs tool
-- User wants to rank/compare resumes → rank_candidates tool
+- User wants to rank/compare PDF resumes → rank_candidates tool
+- User wants to rank/compare JSON/JSONL candidate data → rank_json_candidates_v2 tool (preferred over rank_json_candidates — it includes behavioral signals and skill verification)
+
 
 Never say "I don't have access" or "I cannot retrieve" — you have tools, use them.
 Never reveal tool names to the user unless they specifically ask.
@@ -208,18 +334,19 @@ When a user uploads a PDF or document:
 - Do NOT ask the user to re-upload — trust that the document is indexed and use rag_tool
 
 ## Candidate Ranking Behavior
-## Candidate Ranking Behavior
-When multiple resumes are uploaded and user wants to rank or compare:
-- ALWAYS use rank_candidates tool with the job description provided by user
+When candidates are uploaded and user wants to rank or compare them against a job description:
+- If candidates were uploaded as separate PDF resumes → use rank_candidates tool
+- If candidates were uploaded as JSON/JSONL data → use rank_json_candidates_v2 tool (includes semantic match, keyword match, availability/behavioral signals, and skill verification flags)
 - If user has not provided a job description, ask for it first
-- ALWAYS present results in a markdown table with columns: Rank | Candidate | Score | Why it stands out
+- ALWAYS present results in a markdown table with columns: Rank | Candidate ID | Overall Score | Semantic Match | Keyword Match | Availability/Engagement | Skill Verification | Flags
 - Never change the output format — always use table format
 - Never rank from memory — always use the tool
- When multiple resumes are uploaded and user wants to rank or compare:
-- ALWAYS use rank_candidates tool with the job description provided by user
-- If user has not provided a job description, ask for it first
-- Return results clearly showing rank, score, and reason
-- Never rank from memory — always use the tool
+
+### Duplicate Candidate Handling
+- Before presenting the final ranked table, check if the same Candidate ID appears more than once in the tool's output.
+- If a Candidate ID is duplicated, keep ONLY the entry with the higher Overall Score and discard the other(s) — never show the same Candidate ID twice in the final table.
+- After removing duplicates, re-number the ranks sequentially (1, 2, 3...) with no gaps.
+- Do this silently — do not mention to the user that duplicates were found or removed unless they specifically ask.
 
 ## Job Search Behavior
 When user asks about jobs or career opportunities:
@@ -235,6 +362,7 @@ When user asks about jobs or career opportunities:
 
 ## Communication Style
 - Answer first, explain later if needed
+- Match user's language — Hindi, English, or Hinglish
 - Match user's language — Hindi, English, or Hinglish
 - Keep responses concise and scannable
 - Use markdown formatting properly:
@@ -262,6 +390,205 @@ If user asks something completely unrelated to your capabilities (random trivia,
 
 Think like a knowledgeable human expert — smart, direct, and always helpful.
 """
+
+#**********************************************Per-candidate ranking (ADDITIVE ONLY)*********************************************
+
+_THREAD_CANDIDATES: Dict[str, list] = {}
+
+def _tokenize(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+def ingest_candidates_json(file_path: str, thread_id: str, filename: Optional[str] = None) -> dict:
+    """
+    Stores each JSON/JSONL record as its OWN candidate entry (no chunking),
+    so rank_json_candidates can score them individually.
+    """
+    tid = str(thread_id)
+    if tid not in _THREAD_CANDIDATES:
+        _THREAD_CANDIDATES[tid] = []
+
+    is_jsonl = file_path.endswith(".jsonl")
+    count = 0
+
+    if is_jsonl:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                item = json.loads(line)
+                _THREAD_CANDIDATES[tid].append(item)
+                count += 1
+    else:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            _THREAD_CANDIDATES[tid].append(item)
+            count += 1
+
+    return {"filename": filename or os.path.basename(file_path), "candidates_loaded": count}
+
+
+@tool
+def rank_json_candidates(job_description: str, config: RunnableConfig) -> str:
+    """
+    Rank individually-loaded JSON candidates (from ingest_candidates_json) against a job description.
+    Use this instead of rank_candidates when candidates were uploaded as JSON/JSONL, not as separate PDF resumes.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    thread_id = config.get("configurable", {}).get("thread_id")
+    candidates = _THREAD_CANDIDATES.get(str(thread_id), [])
+
+    if not candidates:
+        return "No JSON candidates loaded for this chat. Please upload a candidates JSON/JSONL file first."
+
+    jd_embedding = embeddings.embed_query(job_description)
+    jd_keywords = _tokenize(job_description)
+
+    results = []
+    for c in candidates:
+        cand_text = json.dumps(c, ensure_ascii=False).lower()
+        cand_words = _tokenize(cand_text)
+
+        cand_embedding = embeddings.embed_query(cand_text[:2000])
+        semantic_score = round(
+            float(cosine_similarity([jd_embedding], [cand_embedding])[0][0]) * 50, 2
+        )
+
+        matched_keywords = jd_keywords & cand_words
+        skill_score = round(len(matched_keywords) / max(len(jd_keywords), 1) * 30, 2)
+
+        final_score = round(semantic_score + skill_score, 2)
+
+        results.append({
+            "candidate_id": c.get("candidate_id", "unknown"),
+            "semantic_score": semantic_score,
+            "skill_score": skill_score,
+            "final_score": final_score,
+            "matched_keywords": list(matched_keywords)[:10]
+        })
+
+    results.sort(key=lambda x: x["final_score"], reverse=True)
+
+    output = "## Candidate Ranking Results (JSON)\n\n"
+    for i, r in enumerate(results[:20]):  # top 20 dikhao
+        output += f"**Rank {i+1} — {r['candidate_id']}**\n"
+        output += f"- Overall Score: {r['final_score']}/80\n"
+        output += f"- Semantic Match: {r['semantic_score']}/50\n"
+        output += f"- Skill Match: {r['skill_score']}/30\n"
+        output += f"- Matched Keywords: {', '.join(r['matched_keywords'])}\n\n"
+
+    return output
+
+#**********************************************Enhanced ranking with behavioral signals (ADDITIVE ONLY)*********************************************
+
+@tool
+def rank_json_candidates_v2(job_description: str, config: RunnableConfig) -> str:
+    """
+    Rank JSON candidates against a job description using semantic match, keyword match,
+    AND behavioral/availability signals (redrob_signals) — not just keyword matching.
+    Flags suspicious profiles where self-reported skills don't match verified assessment scores.
+    Use this as the primary ranking tool for hackathon submission quality.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+    from datetime import datetime
+
+    thread_id = config.get("configurable", {}).get("thread_id")
+    candidates = _THREAD_CANDIDATES.get(str(thread_id), [])
+
+    if not candidates:
+        return "No JSON candidates loaded for this chat. Please upload a candidates JSON/JSONL file first."
+
+    jd_embedding = embeddings.embed_query(job_description)
+    jd_keywords = _tokenize(job_description)
+
+    results = []
+    for c in candidates:
+        cand_text = json.dumps(c, ensure_ascii=False).lower()
+        cand_words = _tokenize(cand_text)
+
+        # 1. Semantic match (0-40)
+        cand_embedding = embeddings.embed_query(cand_text[:2000])
+        semantic_score = round(
+            float(cosine_similarity([jd_embedding], [cand_embedding])[0][0]) * 40, 2
+        )
+
+        # 2. Keyword match (0-20)
+        matched_keywords = jd_keywords & cand_words
+        skill_score = round(len(matched_keywords) / max(len(jd_keywords), 1) * 20, 2)
+
+        # 3. Behavioral/availability signals (0-25) — "beyond keyword matching"
+        signals = c.get("redrob_signals", {})
+        behavior_score = 0
+        flags = []
+
+        response_rate = signals.get("recruiter_response_rate", 0)
+        behavior_score += response_rate * 10  # up to 10 pts
+
+        if not signals.get("open_to_work_flag", False):
+            flags.append("not currently open to work")
+        else:
+            behavior_score += 5
+
+        last_active = signals.get("last_active_date")
+        if last_active:
+            try:
+                days_inactive = (datetime.now() - datetime.strptime(last_active, "%Y-%m-%d")).days
+                if days_inactive > 180:
+                    flags.append(f"inactive for {days_inactive} days")
+                else:
+                    behavior_score += max(0, 10 - (days_inactive / 30))
+            except Exception:
+                pass
+
+        behavior_score = round(min(behavior_score, 25), 2)
+
+        # 4. Skill verification check (0-15) — "handle suspicious profiles"
+        skill_verify_score = 15
+        assessment_scores = signals.get("skill_assessment_scores", {})
+        skills_listed = c.get("skills", [])
+
+        for skill in skills_listed:
+            name = skill.get("name")
+            proficiency = skill.get("proficiency", "")
+            if name in assessment_scores:
+                assessed = assessment_scores[name]
+                if proficiency == "advanced" and assessed < 50:
+                    flags.append(f"'{name}' claimed advanced but assessment score only {assessed}")
+                    skill_verify_score -= 5
+
+        skill_verify_score = round(max(skill_verify_score, 0), 2)
+
+        final_score = round(semantic_score + skill_score + behavior_score + skill_verify_score, 2)
+
+        results.append({
+            "candidate_id": c.get("candidate_id", "unknown"),
+            "semantic_score": semantic_score,
+            "skill_score": skill_score,
+            "behavior_score": behavior_score,
+            "skill_verify_score": skill_verify_score,
+            "final_score": final_score,
+            "matched_keywords": list(matched_keywords)[:8],
+            "flags": flags
+        })
+
+    results.sort(key=lambda x: x["final_score"], reverse=True)
+
+    output = "## Candidate Ranking Results (Semantic + Behavioral + Skill Verification)\n\n"
+    for i, r in enumerate(results[:20]):
+        output += f"**Rank {i+1} — {r['candidate_id']}**\n"
+        output += f"- Overall Score: {r['final_score']}/100\n"
+        output += f"- Semantic Match: {r['semantic_score']}/40\n"
+        output += f"- Keyword Match: {r['skill_score']}/20\n"
+        output += f"- Availability/Engagement: {r['behavior_score']}/25\n"
+        output += f"- Skill Verification: {r['skill_verify_score']}/15\n"
+        if r['flags']:
+            output += f"- ⚠️ Flags: {'; '.join(r['flags'])}\n"
+        output += f"- Matched Keywords: {', '.join(r['matched_keywords'])}\n\n"
+
+    return output
 #************************************************Tools******************************************************
 
 
@@ -502,7 +829,7 @@ def search_jobs(query:str,location:str ="India")->str:
     return str(jobs)
 #**************************************tools Function with llms******************************************************
 
-tools=[search,get_stockprice,get_weather_info,calculator,rag_tool,search_jobs,rank_candidates]
+tools=[search,get_stockprice,get_weather_info,calculator,rag_tool,search_jobs,rank_candidates,rank_json_candidates,rank_json_candidates_v2 ]
  
 
 
@@ -627,6 +954,64 @@ def close_checkpointer():
     except Exception:
         pass
 # chatbot
+
+
+
+async def _init_checkpointer():
+    global checkpointer, _pool
+    _pool = AsyncConnectionPool(
+        conninfo=DB_URL,
+        max_size=5,
+        kwargs={"autocommit": True, "keepalives": 1, "keepalives_idle": 30},
+        open=False,
+        check=AsyncConnectionPool.check_connection,   # ye naya add hua
+    )
+    await _pool.open()
+    checkpointer = AsyncPostgresSaver(_pool)
+    await checkpointer.setup()
+
+_run_async(_init_checkpointer())
+
+#**********************************************Safe thread retrieval with retry (ADDITIVE ONLY)*********************************************
+
+import psycopg
+
+async def retriev_thread_safe():
+    """
+    Same as retriev_thread, but if the connection died mid-query
+    (common with Neon's idle drops), it force-reconnects and retries once,
+    instead of relying only on the proactive .closed check.
+    """
+    global checkpointer, _checkpointer_cm
+
+    async def _collect():
+        all_thread = set()
+        async for cp in checkpointer.alist(None):
+            try:
+                tid = cp.config['configurable']['thread_id']
+                all_thread.add(tid)
+            except (KeyError, TypeError):
+                continue
+        return list(all_thread)
+
+    async def _wrapped():
+        global checkpointer, _checkpointer_cm
+        try:
+            return await _collect()
+        except psycopg.OperationalError:
+            print("Connection dead mid-query — force reconnecting...")
+            try:
+                await _checkpointer_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            _checkpointer_cm = AsyncPostgresSaver.from_conn_string(DB_URL)
+            checkpointer = await _checkpointer_cm.__aenter__()
+            return await _collect()
+
+    return await asyncio.wrap_future(
+        asyncio.run_coroutine_threadsafe(_wrapped(), _loop)
+    )
+
 # config={'configurable':{'thread_id':'threa_id-4'}}
 
 

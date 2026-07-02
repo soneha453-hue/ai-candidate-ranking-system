@@ -12,6 +12,7 @@ Endpoints:
 Run with:
     uvicorn app:app --reload --port 8000
 """
+import os
  
 import json
 import uuid
@@ -26,7 +27,7 @@ from pydantic import BaseModel
  
 from langchain_core.messages import AIMessageChunk, HumanMessage,AIMessage
 
-
+import tempfile as _tempfile
  
 from langgraph_bakend import (
     chatbot,
@@ -35,7 +36,8 @@ from langgraph_bakend import (
     delete_thread,
     checkpointer,
     _loop,
-    run_async_with_reconnect,  
+    run_async_with_reconnect, 
+    ingest_json 
 )
  
  
@@ -167,6 +169,64 @@ async def upload_pdf(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {e}")
+
+    return {
+        "thread_id": thread_id,
+        "message": f"'{summary['filename']}' indexed successfully.",
+        **summary,
+    }
+
+#*************************************************upload jsonfile**********************************************************
+@app.post("/upload-json")
+async def upload_json_file(
+    file: UploadFile = File(...),
+    thread_id: Optional[str] = Form(default=None),
+):
+    if not (file.filename.lower().endswith(".json") or file.filename.lower().endswith(".jsonl")):
+        raise HTTPException(status_code=400, detail="Only JSON or JSONL files are supported.")
+
+    thread_id = thread_id or str(uuid.uuid4())
+
+    suffix = ".jsonl" if file.filename.lower().endswith(".jsonl") else ".json"
+    temp_path = os.path.join(_tempfile.gettempdir(), f"{uuid.uuid4()}{suffix}")
+
+    try:
+        with open(temp_path, "wb") as out_file:
+            while chunk := await file.read(1024 * 1024):  # 1MB streamed, RAM safe
+                out_file.write(chunk)
+
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            summary = await asyncio.wait_for(
+                loop.run_in_executor(
+                    pool,
+                    partial(ingest_json, temp_path, thread_id=thread_id, filename=file.filename)
+                ),
+                timeout=180.0
+            )
+
+        # ---------- NAYA ADD (ranking ke liye candidates ko individually bhi store karo) ----------
+        try:
+            from langgraph_bakend import ingest_candidates_json
+            ingest_candidates_json(temp_path, thread_id=thread_id, filename=file.filename)
+        except Exception as e:
+            print(f"candidate ranking store warning: {e}")
+        # ---------- NAYA ADD KHATAM ----------
+
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="JSON processing timed out. Please try again.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to process JSON: {e}")
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
     return {
         "thread_id": thread_id,
